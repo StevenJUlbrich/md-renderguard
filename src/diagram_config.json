@@ -1,0 +1,42 @@
+{
+  "default": {
+    "max_width": "600px",
+    "max_height": null,
+    "min_width": "300px"
+  },
+  "flowchart": {
+    "max_width": "650px",
+    "max_height": null,
+    "min_width": "300px"
+  },
+  "sequence": {
+    "max_width": "550px",
+    "max_height": null,
+    "min_width": "250px"
+  },
+  "classdiagram": {
+    "max_width": "600px",
+    "max_height": null,
+    "min_width": "300px"
+  },
+  "statediagram": {
+    "max_width": "550px",
+    "max_height": null,
+    "min_width": "250px"
+  },
+  "erdiagram": {
+    "max_width": "700px",
+    "max_height": null,
+    "min_width": "400px"
+  },
+  "gantt": {
+    "max_width": "800px",
+    "max_height": null,
+    "min_width": "500px"
+  },
+  "pie": {
+    "max_width": "450px",
+    "max_height": "450px",
+    "min_width": "300px"
+  }
+}
