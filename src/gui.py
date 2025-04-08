@@ -623,8 +623,22 @@ class MermaidConverterGUI:
         )
 
     def _quit_application(self):
-        # ... (same as previous version) ...
+        """Gracefully shut down the application with proper cleanup."""
         self.logger.info("Quit button clicked. Exiting application.")
+
+        # Stop any running operations
+        if self.is_processing:
+            self.logger.warning(
+                "Quit requested during active processing - attempting to clean up"
+            )
+            # Stop progress animation
+            if hasattr(self, "progress") and self.progress.winfo_exists():
+                self.progress.stop()
+
+        # Close any open file handlers or resources
+        logging.shutdown()
+
+        # Destroy the root window
         self.root.destroy()
 
     def browse_file(self):
@@ -766,6 +780,25 @@ class MermaidConverterGUI:
 
     def start_conversion(self):
         """Validates inputs and starts the conversion in a background thread."""
+        # Add validation before processing
+        file_path = self.file_path_var.get()
+        if not file_path:
+            messagebox.showerror(
+                "Input Error", "Please select input file.", parent=self.root
+            )
+            return
+
+        # Validate image prefix - check for invalid characters
+        image_prefix = self.image_prefix_var.get()
+        invalid_chars = r'<>:"/\|?*'
+        if any(c in invalid_chars for c in image_prefix):
+            messagebox.showerror(
+                "Invalid Input",
+                f"Image prefix contains invalid characters.\nAvoid using: {invalid_chars}",
+                parent=self.root,
+            )
+            return
+
         if self.is_processing:
             self.logger.warning("Conversion already in progress.")
             messagebox.showwarning(
@@ -773,12 +806,6 @@ class MermaidConverterGUI:
             )
             return
 
-        file_path = self.file_path_var.get()
-        if not file_path:
-            messagebox.showerror(
-                "Input Error", "Please select input file.", parent=self.root
-            )
-            return
         abs_file_path = os.path.abspath(file_path)
         if not os.path.isfile(abs_file_path):
             messagebox.showerror(
