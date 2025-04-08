@@ -491,6 +491,50 @@ class MermaidConverterGUI:
             row=current_row, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 5)
         )
         current_row += 1
+
+        # Add tooltips to key UI elements
+        from tkinter import Label, Toplevel
+
+        def create_tooltip(widget, text):
+            def enter(event):
+                x, y, _, _ = widget.bbox("insert")
+                x += widget.winfo_rootx() + 25
+                y += widget.winfo_rooty() + 25
+
+                # Create tooltip window
+                tip = Toplevel(widget)
+                tip.wm_overrideredirect(True)
+                tip.wm_geometry(f"+{x}+{y}")
+                label = Label(
+                    tip,
+                    text=text,
+                    background="#FFFFCC",
+                    relief="solid",
+                    borderwidth=1,
+                    padx=5,
+                    pady=2,
+                )
+                label.pack()
+
+                widget.tooltip = tip
+
+            def leave(event):
+                if hasattr(widget, "tooltip"):
+                    widget.tooltip.destroy()
+                    del widget.tooltip
+
+            widget.bind("<Enter>", enter)
+            widget.bind("<Leave>", leave)
+
+        create_tooltip(
+            move_cb,
+            "Move original file with Mermaid syntax to a subfolder after conversion",
+        )
+        create_tooltip(
+            self.add_readme_checkbox,
+            "Create an explanatory README file in the subfolder with the original file",
+        )
+
         return frame
 
     def create_action_buttons_frame(self):
@@ -700,7 +744,6 @@ class MermaidConverterGUI:
             print(f"GUI Log Error: {e}", file=sys.stderr)
 
     def process_log_queue(self):
-        # ... (same as previous version) ...
         try:
             while True:
                 record = log_queue.get_nowait()
