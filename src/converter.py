@@ -408,46 +408,13 @@ def replace_mermaid_with_images_enhanced(
     return new_content, successful_replacements
 
 
-def process_markdown_file(
-    file_path,
-    image_prefix="diagram",
-    image_format="svg",
-    image_dir=None,
-    diagram_config=None,
-    use_html_wrapper=True,
-    output_suffix="-img",
-    # Note: move_original and add_readme args are removed, caller handles this
-):
-    """
-    Processes a Markdown file: finds Mermaid blocks, converts them to images,
-    generates the potentially modified markdown content string.
-
-    Args:
-        file_path (str): Path to the input Markdown file.
-        image_prefix (str, optional): Prefix for generated image filenames. Defaults to "diagram".
-        image_format (str, optional): Output image format ('svg' or 'png'). Defaults to "svg".
-        image_dir (str, optional): Specific directory for images. Defaults to None (creates 'images/' subdir).
-        diagram_config (dict, optional): Diagram configuration dictionary. Defaults to None (loads default config).
-        use_html_wrapper (bool, optional): Wrap SVG images in HTML `<div><img>` tag. Defaults to True.
-        output_suffix (str, optional): Suffix added to the original filename for the output file path calculation. Defaults to "-img".
-
-    Returns:
-        dict: A dictionary containing results and information for the caller:
-              - input_file_path (str): Absolute path to the input file.
-              - total_diagrams (int)
-              - successful_conversions (int)
-              - failed_conversions (int)
-              - output_file_path (str): Calculated absolute path for the potential output markdown file.
-              - image_directory (str): Absolute path to the directory containing images.
-              - all_conversions_successful (bool): True if all diagrams converted without error.
-              - generated_image_paths (list[str]): List of absolute paths to successfully generated images.
-              - new_content (str): The generated markdown content string (with image links or error comments).
-              - error (str | None): An error message if a critical error occurred early.
-    """
+def process_markdown_file(file_path, **kwargs):
+    """Enhanced with telemetry for performance monitoring"""
     # Get logger for this function
     func_logger = logging.getLogger(__name__)
 
     # Ensure diagram configuration is loaded if not provided
+    diagram_config = kwargs.get("diagram_config", None)
     if diagram_config is None:
         func_logger.debug("Diagram config not provided, loading default.")
         diagram_config = load_diagram_config()
@@ -464,6 +431,15 @@ def process_markdown_file(
         "generated_image_paths": [],  # List of successfully created images
         "new_content": "",  # The generated markdown content
         "error": None,  # For early critical errors
+    }
+
+    # Add telemetry data
+    stats["telemetry"] = {
+        "start_time": time.time(),
+        "processing_times": [],
+        "total_runtime": 0,
+        "avg_diagram_time": 0,
+        "image_sizes": [],
     }
 
     try:
@@ -502,7 +478,7 @@ def process_markdown_file(
         )
 
         # --- Prepare Image Directory ---
-        abs_image_dir = create_image_directory(abs_file_path, image_dir)
+        abs_image_dir = create_image_directory(abs_file_path, kwargs.get("image_dir"))
         stats["image_directory"] = abs_image_dir
         func_logger.info(f"Using image directory: {abs_image_dir}")
 
@@ -520,13 +496,24 @@ def process_markdown_file(
                 f"--- Processing Diagram {diagram_index}/{len(mermaid_blocks)} ---"
             )
             image_name = create_image_name(
-                image_prefix, diagram_index, block, image_format
+                kwargs.get("image_prefix", "diagram"),
+                diagram_index,
+                block,
+                kwargs.get("image_format", "svg"),
             )
             abs_image_path = os.path.join(abs_image_dir, image_name)
 
-            success = generate_image_from_mermaid(block, abs_image_path, image_format)
+            start_time = time.time()
+            success = generate_image_from_mermaid(
+                block, abs_image_path, kwargs.get("image_format", "svg")
+            )
+            end_time = time.time()
+            stats["telemetry"]["processing_times"].append(end_time - start_time)
 
             if success:
+                stats["telemetry"]["image_sizes"].append(
+                    os.path.getsize(abs_image_path)
+                )
                 generated_images_list.append(
                     abs_image_path
                 )  # Add to list for potential rollback
@@ -551,7 +538,9 @@ def process_markdown_file(
 
         # --- Determine Potential Output Filename ---
         abs_file_path_obj = Path(abs_file_path)
-        output_file_name = f"{abs_file_path_obj.stem}{output_suffix}.md"
+        output_file_name = (
+            f"{abs_file_path_obj.stem}{kwargs.get('output_suffix', '-img')}.md"
+        )
         abs_output_file = abs_file_path_obj.parent / output_file_name
         stats["output_file_path"] = str(abs_output_file)  # Store potential output path
 
@@ -559,13 +548,27 @@ def process_markdown_file(
         # This happens regardless of success/failure; failed blocks are commented out
         func_logger.info("Generating final markdown content string...")
         new_content_str, successful_replacements = replace_mermaid_with_images_enhanced(
-            content, mermaid_blocks, image_paths_info, diagram_config, use_html_wrapper
+            content,
+            mermaid_blocks,
+            image_paths_info,
+            diagram_config,
+            kwargs.get("use_html_wrapper", True),
         )
         stats["new_content"] = new_content_str  # Store the generated content
 
         if successful_replacements != stats["successful_conversions"]:
             func_logger.warning(
                 f"Mismatch Alert: {stats['successful_conversions']} successful conversions vs {successful_replacements} replacements."
+            )
+
+        # Compute final telemetry
+        stats["telemetry"]["total_runtime"] = (
+            time.time() - stats["telemetry"]["start_time"]
+        )
+        if stats["successful_conversions"] > 0:
+            stats["telemetry"]["avg_diagram_time"] = (
+                sum(stats["telemetry"]["processing_times"])
+                / stats["successful_conversions"]
             )
 
         # --- Return Results ---
