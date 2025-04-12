@@ -21,8 +21,8 @@ erDiagram
 graph = Graph("erdiagram", mermaid_syntax)
 
 # Generate the SVG content directly from the Graph object
-md.Mermaid(graph).to_svg("./support_apps/image/mermaid_diagram.svg")
-md.Mermaid(graph).to_png("./support_apps/image/mermaid_diagram.png")
+md.Mermaid(graph).to_svg("./src/image/mermaid_diagram.svg")
+md.Mermaid(graph).to_png("./src/image/mermaid_diagram.png")
 
 
 print("Mermaid diagram saved as mermaid_diagram")
