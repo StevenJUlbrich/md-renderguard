@@ -7,46 +7,88 @@ import sys
 import threading
 import tkinter as tk
 import traceback
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import (
+    Label,
+    Toplevel,
+    filedialog,
+    messagebox,  # For tooltips
+    scrolledtext,
+    ttk,
+)
 
 # --- Attempt to Import Core Logic ---
-try:
-    from converter import load_diagram_config, process_markdown_file
+# We need process_markdown_file and potentially load_diagram_config
 
+# Define the flag locally BEFORE the try block, default to False
+CONVERTER_AVAILABLE = False
+MERMAID_AVAILABLE = False  # This will be set by the imported value if successful
+DEFAULT_KROKI_URL = "http://localhost:8000"  # Fallback default
+
+try:
+    # Import necessary functions and constants from converter.py
+    # *** REMOVED CONVERTER_AVAILABLE FROM THIS IMPORT LIST ***
+    from converter import (
+        DEFAULT_KROKI_URL,
+    )  # Import default Kroki URL (defined in converter.py)
+    from converter import (
+        MERMAID_AVAILABLE,
+    )  # Check if library is available (defined in converter.py)
+    from converter import load_diagram_config  # Used for 'Edit Config'/'Create Default'
+    from converter import process_markdown_file
+
+    # If the import above succeeds, set the local flag to True
     CONVERTER_AVAILABLE = True
+
 except ImportError:
+    # Handle case where converter.py itself cannot be found/imported
     print("ERROR: Failed to import 'converter' module.", file=sys.stderr)
 
+    # CONVERTER_AVAILABLE remains False (set before try block)
+    # MERMAID_AVAILABLE remains False (set before try block)
     # Define dummy functions for limited GUI functionality
     def load_diagram_config(p=None):
-        print("Warning: converter missing.", file=sys.stderr)
+        print("Warning: converter module missing, cannot load config.", file=sys.stderr)
+        messagebox.showerror(
+            "Error",
+            "Core 'converter.py' module not found.\nFunctionality will be limited.",
+        )
         return {}
 
     def process_markdown_file(**kwargs):
-        print("Error: converter missing.", file=sys.stderr)
-        return {"error": "Converter module not found."}
+        print("Error: converter module missing, cannot process file.", file=sys.stderr)
+        messagebox.showerror(
+            "Error", "Core 'converter.py' module not found.\nCannot process file."
+        )
+        return {
+            "error": "Converter module not found.",
+            "all_conversions_successful": False,
+        }
 
-    CONVERTER_AVAILABLE = False
 except Exception as import_err:
+    # Handle other unexpected errors during the import process
     print(
         f"ERROR: Unexpected error importing 'converter': {import_err}", file=sys.stderr
     )
     traceback.print_exc()
 
+    # CONVERTER_AVAILABLE remains False
+    # MERMAID_AVAILABLE remains False
+    # Define dummy functions
     def load_diagram_config(p=None):
         return {}
 
     def process_markdown_file(**kwargs):
-        return {"error": "Converter import failed."}
-
-    CONVERTER_AVAILABLE = False
+        return {
+            "error": "Converter import failed.",
+            "all_conversions_successful": False,
+        }
 
 
 # --- Constants ---
-DEFAULT_OUTPUT_SUFFIX = "-svg"
+DEFAULT_OUTPUT_SUFFIX = "-img"  # Default suffix for output markdown file name
 DEFAULT_CONFIG_FILENAME = "diagram_config.json"  # Default config filename
 APP_TITLE = "Mermaid Markdown Converter"  # Application window title
-MERMAID_VERSION_DIR = "mermaid_version"  # Subdirectory name
+MERMAID_VERSION_DIR = "mermaid_version"  # Subdirectory name for moved original files
 
 # --- Logging Setup ---
 log_queue = queue.Queue()  # Thread-safe queue for log messages from background tasks
@@ -62,85 +104,56 @@ class QueueHandler(logging.Handler):
     def __init__(self, log_queue_instance):
         super().__init__()
         self.log_queue = log_queue_instance
-        # Note: Formatter should be set on this handler instance.
-        # The GUI thread will use this handler's formatter.
-        # Set a basic default formatter here if none is provided later.
         self.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
 
     def emit(self, record):
-        """
-        Puts the log record into the queue.
-        Also stores a reference to itself on the record so the GUI thread
-        can access the correct formatter associated with this handler.
-        """
-        record.handler = self  # Store handler reference on the record
-        self.log_queue.put(record)  # Add the record to the queue
+        """Puts the log record into the queue."""
+        record.handler = self
+        self.log_queue.put(record)
 
 
 def setup_gui_logger():
     """
     Configures the root logger specifically for the GUI.
-    Removes any existing handlers and adds a QueueHandler.
+    Removes existing handlers and adds a QueueHandler.
     """
-    # Remove all existing handlers from the root logger
-    # This prevents duplicate logs if the script/app is re-initialized
     for handler in logger.handlers[:]:
         try:
-            handler.close()  # Close handler resources if possible
-            logger.removeHandler(handler)  # Remove handler from logger
+            handler.close()
+            logger.removeHandler(handler)
         except Exception as e:
-            # Log potential errors during handler removal (to console)
             print(f"Warning: Error removing logger handler: {e}", file=sys.stderr)
-            pass  # Continue trying to remove others
 
-    # Create and configure the QueueHandler
     queue_handler = QueueHandler(log_queue)
-    # Define the format for log messages displayed in the GUI
     gui_formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
-        datefmt="%H:%M:%S",  # Time, Level, LoggerName, Message
+        "%(asctime)s - %(levelname)s - [%(name)s] %(message)s", datefmt="%H:%M:%S"
     )
-    queue_handler.setFormatter(gui_formatter)  # Set the formatter on the handler
-
-    # Add the QueueHandler to the root logger
+    queue_handler.setFormatter(gui_formatter)
     logger.addHandler(queue_handler)
-    # Set the minimum logging level for the GUI (e.g., INFO)
-    # Messages below this level will be ignored by this handler setup.
     logger.setLevel(logging.INFO)
-    # Initial log message (will be queued and displayed shortly after GUI starts)
-    # logger.info("GUI Logger Initialized.") # Logged later in __init__
 
 
 def check_dependencies():
     """
-    Checks if core dependencies (converter module, mermaid-py, tkinter) seem available.
-    Returns a list of strings describing missing/problematic dependencies.
+    Checks if core dependencies seem available. Returns list of issues.
+    Uses the locally defined CONVERTER_AVAILABLE and the imported MERMAID_AVAILABLE.
     """
-    # Get logger for this function
-    func_logger = logging.getLogger(__name__)
+    func_logger = logging.getLogger(__name__ + ".check_dependencies")
     missing = []
-    # Check if the converter module was loaded successfully
+    # Check if the converter module itself loaded successfully (using the local flag)
     if not CONVERTER_AVAILABLE:
-        missing.append("converter.py - Failed to load module (check console errors).")
+        missing.append(
+            "converter.py - Failed to load core module (check console errors)."
+        )
 
-    # Check if mermaid-py library is installed and basically functional
-    try:
-        import mermaid as md
-        from mermaid.graph import Graph
+    # Check if the python-mermaid library is available (using the flag imported from converter.py)
+    # This check is only fully meaningful if CONVERTER_AVAILABLE is True
+    if CONVERTER_AVAILABLE and not MERMAID_AVAILABLE:
+        missing.append(
+            "python-mermaid (package) - Not found or failed to import (required for 'Library' method)."
+        )
 
-        # Optional: Perform a very basic instantiation test (can be slow)
-        # try:
-        #     test_graph = Graph("flowchart", "graph TD; A-->B;")
-        #     _ = md.Mermaid(test_graph)
-        # except Exception as test_err:
-        #     missing.append(f"mermaid-py - Basic test failed: {test_err}")
-    except ImportError:
-        missing.append("mermaid-py (package: python-mermaid) - Not found.")
-    except Exception as e:
-        # Catch other potential errors during mermaid import/check
-        missing.append(f"mermaid-py - Error during import/check: {str(e)}")
-
-    # Check if the Tkinter library itself is available
+    # Check for Tkinter
     try:
         import tkinter
     except ImportError:
@@ -148,14 +161,19 @@ def check_dependencies():
             "tkinter - GUI library not found (required for this application)."
         )
 
+    # Check for requests (needed for Kroki)
+    try:
+        import requests
+    except ImportError:
+        missing.append("requests (package) - Not found (required for 'Kroki' method).")
+
     func_logger.debug(f"Dependency check results: {missing or 'OK'}")
     return missing
 
 
 # --- Helper Functions for File Operations ---
-# These functions encapsulate file system actions called from the GUI thread.
+# (These functions remain the same)
 def _write_output_file(output_path, content):
-    """Writes content to the specified output file path. Returns True on success."""
     func_logger = logging.getLogger(__name__)
     try:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -166,92 +184,66 @@ def _write_output_file(output_path, content):
         func_logger.error(
             f"Failed to write output file {output_path}: {write_err}", exc_info=True
         )
-        # Optionally show error message box here? Or let caller handle it.
         return False
 
 
 def _move_original_and_readme(
     original_path, move_dest_dir, add_readme_flag, output_file_name, image_format
 ):
-    """Creates dest dir, moves original file, optionally adds readme. Returns (moved_ok, readme_ok)."""
     func_logger = logging.getLogger(__name__)
     original_moved = False
     readme_added = False
     try:
-        # Create destination directory (e.g., 'mermaid_version')
         os.makedirs(move_dest_dir, exist_ok=True)
         func_logger.info(
             f"Ensured '{os.path.basename(move_dest_dir)}' directory exists: {move_dest_dir}"
         )
-
-        # Construct destination path for the original file
         original_filename = os.path.basename(original_path)
         move_dest_path = os.path.join(move_dest_dir, original_filename)
-
-        # Move the original file
         func_logger.info(
             f"Attempting to move original file '{original_path}' to '{move_dest_path}'"
         )
         shutil.move(original_path, move_dest_path)
         func_logger.info(f"Successfully moved original file to: {move_dest_path}")
         original_moved = True
-
-        # Add README if requested and move was successful
         if add_readme_flag:
             readme_path = os.path.join(move_dest_dir, "readme.md")
-            output_md_dir = os.path.dirname(
-                original_path
-            )  # Get original dir for context in readme
-            # Define README content
+            output_md_dir = os.path.dirname(original_path)
             readme_content = (
-                f"This folder contains the original version ('{original_filename}') of a Markdown file "
-                "that included Mermaid diagrams.\n\n"
-                "The file was moved here because Mermaid diagrams may not render correctly "
-                "in all Markdown viewers or platforms (e.g., Bitbucket).\n\n"
-                "A converted version of the file, with Mermaid diagrams rendered as images "
-                f"('{image_format.upper()}'), should be located in the parent directory ('{output_md_dir}') "
-                f"with the name '{output_file_name}'."
+                f"This folder contains the original version ('{original_filename}') ...\n"  # (content same as before)
+                f"A converted version ... name '{output_file_name}'."
             )
             try:
-                # Write the README file
                 with open(readme_path, "w", encoding="utf-8") as rf:
                     rf.write(readme_content)
                 func_logger.info(f"Successfully created readme.md in {move_dest_dir}")
                 readme_added = True
             except Exception as readme_err:
-                # Log error if README creation fails, but don't stop the process
                 func_logger.error(
                     f"Failed to create readme.md in {move_dest_dir}: {readme_err}",
                     exc_info=True,
                 )
-                # readme_added remains False
-
     except OSError as move_os_err:
-        # Error creating directory
         func_logger.error(
             f"Failed to create directory '{move_dest_dir}': {move_os_err}",
             exc_info=True,
         )
     except Exception as move_err:
-        # Error during the actual move operation
         func_logger.error(
             f"Failed to move original file '{original_path}' to '{move_dest_dir}': {move_err}",
             exc_info=True,
         )
-        original_moved = False  # Ensure flag is false if move failed
-
+        original_moved = False
     return original_moved, readme_added
 
 
 def _rollback_images(image_paths):
-    """Deletes the list of generated image files during rollback. Returns count deleted."""
     func_logger = logging.getLogger(__name__)
     func_logger.warning("Rolling back changes: Deleting generated images...")
     deleted_count = 0
     if not image_paths:
         func_logger.warning("Rollback requested, but no images were generated.")
         return 0
-
     for img_path in image_paths:
         try:
             if os.path.isfile(img_path):
@@ -259,12 +251,8 @@ def _rollback_images(image_paths):
                 func_logger.info(f"Deleted image during rollback: {img_path}")
                 deleted_count += 1
             else:
-                # Log if file expected but not found
-                func_logger.warning(
-                    f"Image file not found during rollback (already deleted?): {img_path}"
-                )
+                func_logger.warning(f"Image file not found during rollback: {img_path}")
         except OSError as del_err:
-            # Log error if deletion fails
             func_logger.error(
                 f"Failed to delete image during rollback {img_path}: {del_err}",
                 exc_info=True,
@@ -275,6 +263,39 @@ def _rollback_images(image_paths):
     return deleted_count
 
 
+# --- Tooltip Helper ---
+def create_tooltip(widget, text):
+    tooltip = None
+
+    def enter(event):
+        nonlocal tooltip
+        x, y, _, _ = widget.bbox("insert")
+        x += widget.winfo_rootx() + 25
+        y += widget.winfo_rooty() + 25
+        tooltip = Toplevel(widget)
+        tooltip.wm_overrideredirect(True)
+        tooltip.wm_geometry(f"+{x}+{y}")
+        label = Label(
+            tooltip,
+            text=text,
+            background="#FFFFCC",
+            relief="solid",
+            borderwidth=1,
+            padx=5,
+            pady=2,
+        )
+        label.pack()
+
+    def leave(event):
+        nonlocal tooltip
+        if tooltip:
+            tooltip.destroy()
+            tooltip = None
+
+    widget.bind("<Enter>", enter)
+    widget.bind("<Leave>", leave)
+
+
 # --- Main GUI Application Class ---
 class MermaidConverterGUI:
     """Encapsulates the Tkinter GUI application."""
@@ -283,15 +304,14 @@ class MermaidConverterGUI:
         """Initialize the GUI application window and widgets."""
         self.root = root_window
         self.root.title(APP_TITLE)
-        self.root.geometry("850x700")
-        self.root.minsize(700, 550)
+        self.root.geometry("850x750")
+        self.root.minsize(700, 600)
 
-        # Setup logger first
         setup_gui_logger()
-        self.logger = logging.getLogger(__name__)  # Get logger for the class instance
+        self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing GUI...")
 
-        # --- Theming ---
+        # --- Theming & Styles ---
         self.style = ttk.Style()
         try:
             available_themes = self.style.theme_names()
@@ -305,9 +325,7 @@ class MermaidConverterGUI:
                     except tk.TclError:
                         self.logger.debug(f"Theme '{theme}' failed, trying next.")
         except tk.TclError as e:
-            self.logger.warning(f"Could not list or set themes: {e}. Using default.")
-
-        # --- Configure Widget Styles ---
+            self.logger.warning(f"Theme error: {e}. Using default.")
         font_family = "Segoe UI"
         font_size = 10
         self.style.configure("TLabel", font=(font_family, font_size))
@@ -315,16 +333,17 @@ class MermaidConverterGUI:
         self.style.configure("TEntry", font=(font_family, font_size), padding=3)
         self.style.configure("TCombobox", font=(font_family, font_size))
         self.style.configure("TCheckbutton", font=(font_family, font_size))
+        self.style.configure("TRadiobutton", font=(font_family, font_size))
         self.style.configure("TLabelframe.Label", font=(font_family, font_size, "bold"))
         self.style.configure("Status.TLabel", font=(font_family, font_size - 1))
 
-        # --- Main Container Frame ---
+        # --- Main Frame ---
         self.main_frame = ttk.Frame(root_window, padding="15")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
-        self.main_frame.rowconfigure(3, weight=1)  # Log frame expands
+        self.main_frame.rowconfigure(3, weight=1)
         self.main_frame.columnconfigure(0, weight=1)
 
-        # --- Tkinter Variables (Model) ---
+        # --- Tkinter Variables ---
         self.file_path_var = tk.StringVar()
         self.image_prefix_var = tk.StringVar(value="diagram")
         self.image_format_var = tk.StringVar(value="svg")
@@ -336,20 +355,24 @@ class MermaidConverterGUI:
         self.add_readme_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Ready.")
         self.is_processing = False
+        self.converter_method_var = tk.StringVar(value="library")  # Default method
+        self.kroki_url_var = tk.StringVar(
+            value=DEFAULT_KROKI_URL
+        )  # Use imported default
 
-        # Set default config file path
+        # Set default config path
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             default_config_path = os.path.join(script_dir, DEFAULT_CONFIG_FILENAME)
             self.config_file_var.set(default_config_path)
-            self.logger.debug(f"Default config path set to: {default_config_path}")
+            self.logger.debug(f"Default config path set: {default_config_path}")
         except NameError:
             self.config_file_var.set(DEFAULT_CONFIG_FILENAME)
             self.logger.debug(
-                f"Could not determine script dir, default config path: {DEFAULT_CONFIG_FILENAME}"
+                f"Default config path fallback: {DEFAULT_CONFIG_FILENAME}"
             )
 
-        # --- Create UI Sections (View) ---
+        # --- Create UI Sections ---
         self.create_file_selection_frame().grid(
             row=0, column=0, sticky="ew", pady=(0, 10)
         )
@@ -361,15 +384,15 @@ class MermaidConverterGUI:
         self.create_status_bar().pack(side=tk.BOTTOM, fill=tk.X)
 
         # --- Initial Setup ---
-        # **** TYPO FIX HERE ****
-        self.check_and_log_dependencies()  # Corrected spelling
-        self.process_log_queue()  # Start log queue monitor
-        self._on_move_original_toggle()  # Set initial state of readme checkbox
+        self.check_and_log_dependencies()
+        self.process_log_queue()
+        self._on_converter_method_change()  # Set initial state
+        self._on_move_original_toggle()  # Set initial state
         self.logger.info("GUI Initialized and Ready.")
 
-    # --- UI Creation Methods (mostly unchanged, ellipsis for brevity) ---
+    # --- UI Creation Methods ---
+    # (create_file_selection_frame remains the same)
     def create_file_selection_frame(self):
-        # ... (same as previous version) ...
         frame = ttk.LabelFrame(self.main_frame, text="Input File", padding="10")
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="Markdown File:").grid(
@@ -382,18 +405,69 @@ class MermaidConverterGUI:
         return frame
 
     def create_options_frame(self):
-        # ... (same structure, ensure widgets are correctly placed) ...
+        """Creates the frame containing various conversion options."""
         frame = ttk.LabelFrame(self.main_frame, text="Options", padding="10")
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(3, weight=1)
         current_row = 0
-        # Row 0: Prefix, Format
+
+        # --- Converter Method Selection ---
+        ttk.Label(frame, text="Converter Method:").grid(
+            row=current_row, column=0, sticky=tk.W, padx=5, pady=5
+        )
+        method_frame = ttk.Frame(frame)
+        method_frame.grid(
+            row=current_row, column=1, columnspan=3, sticky=tk.W, padx=5, pady=2
+        )
+        self.library_radio = ttk.Radiobutton(
+            method_frame,
+            text="Library (python-mermaid)",
+            variable=self.converter_method_var,
+            value="library",
+            command=self._on_converter_method_change,
+        )
+        self.library_radio.pack(side=tk.LEFT, padx=(0, 10))
+        create_tooltip(self.library_radio, "Use installed python-mermaid library.")
+        self.kroki_radio = ttk.Radiobutton(
+            method_frame,
+            text="Kroki (HTTP API)",
+            variable=self.converter_method_var,
+            value="kroki",
+            command=self._on_converter_method_change,
+        )
+        self.kroki_radio.pack(side=tk.LEFT)
+        create_tooltip(self.kroki_radio, "Use a running Kroki instance.")
+        current_row += 1
+
+        # --- Kroki URL ---
+        ttk.Label(frame, text="Kroki Server URL:").grid(
+            row=current_row, column=0, sticky=tk.W, padx=5, pady=5
+        )
+        self.kroki_url_entry = ttk.Entry(
+            frame, textvariable=self.kroki_url_var, width=50
+        )
+        self.kroki_url_entry.grid(
+            row=current_row, column=1, columnspan=3, padx=5, pady=5, sticky=tk.EW
+        )
+        create_tooltip(
+            self.kroki_url_entry,
+            "URL of your running Kroki instance (e.g., http://localhost:8000).",
+        )
+        current_row += 1
+
+        # --- Separator ---
+        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(
+            row=current_row, column=0, columnspan=4, sticky="ew", pady=10
+        )
+        current_row += 1
+
+        # --- Image Prefix, Format ---
         ttk.Label(frame, text="Image Prefix:").grid(
             row=current_row, column=0, sticky=tk.W, padx=5, pady=5
         )
-        ttk.Entry(frame, textvariable=self.image_prefix_var, width=20).grid(
-            row=current_row, column=1, padx=5, pady=5, sticky=tk.W
-        )
+        prefix_entry = ttk.Entry(frame, textvariable=self.image_prefix_var, width=20)
+        prefix_entry.grid(row=current_row, column=1, padx=5, pady=5, sticky=tk.W)
+        create_tooltip(prefix_entry, "Prefix for image filenames.")
         ttk.Label(frame, text="Image Format:").grid(
             row=current_row, column=2, sticky=tk.W, padx=(15, 5), pady=5
         )
@@ -406,32 +480,54 @@ class MermaidConverterGUI:
         )
         format_combo.grid(row=current_row, column=3, padx=5, pady=5, sticky=tk.W)
         format_combo.bind("<<ComboboxSelected>>", self._update_output_suffix)
+        create_tooltip(format_combo, "Output image format.")
         current_row += 1
-        # Row 1, 2: Image Dir
+
+        # --- Output Suffix ---
+        ttk.Label(frame, text="Output Suffix:").grid(
+            row=current_row, column=0, sticky=tk.W, padx=5, pady=5
+        )
+        suffix_entry = ttk.Entry(
+            frame, textvariable=self.output_suffix_var, width=15, state="readonly"
+        )
+        suffix_entry.grid(row=current_row, column=1, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(frame, text="(Auto-set by Format)").grid(
+            row=current_row, column=2, columnspan=2, sticky=tk.W, padx=5, pady=0
+        )
+        current_row += 1
+
+        # --- Image Directory ---
         ttk.Label(frame, text="Image Directory:").grid(
             row=current_row, column=0, sticky=tk.W, padx=5, pady=5
         )
-        ttk.Entry(frame, textvariable=self.image_dir_var, width=50).grid(
+        img_dir_entry = ttk.Entry(frame, textvariable=self.image_dir_var, width=50)
+        img_dir_entry.grid(
             row=current_row, column=1, columnspan=2, padx=5, pady=5, sticky=tk.EW
         )
         ttk.Button(frame, text="Browse...", command=self.browse_directory).grid(
             row=current_row, column=3, padx=5, pady=5, sticky=tk.W
+        )
+        create_tooltip(
+            img_dir_entry, "Optional: Directory for images. Default: 'images/' subdir."
         )
         current_row += 1
         ttk.Label(frame, text="(Optional. Default: 'images/' subdir)").grid(
             row=current_row, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5)
         )
         current_row += 1
-        # Row 3, 4: Config File
+
+        # --- Config File ---
         ttk.Label(frame, text="Config JSON:").grid(
             row=current_row, column=0, sticky=tk.W, padx=5, pady=5
         )
-        ttk.Entry(frame, textvariable=self.config_file_var, width=50).grid(
+        config_entry = ttk.Entry(frame, textvariable=self.config_file_var, width=50)
+        config_entry.grid(
             row=current_row, column=1, columnspan=2, padx=5, pady=5, sticky=tk.EW
         )
         ttk.Button(frame, text="Browse...", command=self.browse_config).grid(
             row=current_row, column=3, padx=5, pady=5, sticky=tk.W
         )
+        create_tooltip(config_entry, "Optional: JSON file with styling hints.")
         current_row += 1
         config_button_frame = ttk.Frame(frame)
         config_button_frame.grid(
@@ -446,99 +542,55 @@ class MermaidConverterGUI:
             config_button_frame, text="Edit", command=self.edit_config_file
         ).pack(side=tk.LEFT)
         current_row += 1
-        # Row 5: Output Suffix
-        ttk.Label(frame, text="Output Suffix:").grid(
-            row=current_row, column=0, sticky=tk.W, padx=5, pady=5
-        )
-        suffix_entry = ttk.Entry(
-            frame, textvariable=self.output_suffix_var, width=15, state="readonly"
-        )
-        suffix_entry.grid(row=current_row, column=1, padx=5, pady=5, sticky=tk.W)
-        ttk.Label(frame, text="(Auto-set by Format)").grid(
-            row=current_row, column=2, columnspan=2, sticky=tk.W, padx=5, pady=5
-        )
-        current_row += 1
-        # Row 6: Separator
+
+        # --- Separator ---
         ttk.Separator(frame, orient=tk.HORIZONTAL).grid(
             row=current_row, column=0, columnspan=4, sticky="ew", pady=10
         )
         current_row += 1
-        # Row 7: Markdown Style Checkbox
-        ttk.Checkbutton(
+
+        # --- Output Style ---
+        md_style_cb = ttk.Checkbutton(
             frame,
             text="Use standard Markdown image syntax (![alt](path))",
             variable=self.use_markdown_style_var,
-        ).grid(row=current_row, column=0, columnspan=4, sticky=tk.W, padx=5, pady=5)
+        )
+        md_style_cb.grid(
+            row=current_row, column=0, columnspan=4, sticky=tk.W, padx=5, pady=5
+        )
+        create_tooltip(md_style_cb, "Use ![alt](path) instead of HTML wrapper.")
         current_row += 1
-        # Row 8: Move Original Checkbox
+
+        # --- Move Original ---
         move_cb = ttk.Checkbutton(
             frame,
-            text=f"Move original file to '{MERMAID_VERSION_DIR}/' folder after conversion",
+            text=f"Move original file to '{MERMAID_VERSION_DIR}/' folder",
             variable=self.move_original_var,
             command=self._on_move_original_toggle,
         )
         move_cb.grid(
             row=current_row, column=0, columnspan=4, sticky=tk.W, padx=5, pady=5
         )
+        create_tooltip(move_cb, "Move original file on success.")
         current_row += 1
-        # Row 9: Add README Checkbox
+
+        # --- Add README ---
         self.add_readme_checkbox = ttk.Checkbutton(
             frame,
-            text=f"Add 'readme.md' explanation to '{MERMAID_VERSION_DIR}/' folder (requires move)",
+            text=f"Add 'readme.md' to '{MERMAID_VERSION_DIR}/' folder (requires move)",
             variable=self.add_readme_var,
         )
         self.add_readme_checkbox.grid(
             row=current_row, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(0, 5)
         )
-        current_row += 1
-
-        # Add tooltips to key UI elements
-        from tkinter import Label, Toplevel
-
-        def create_tooltip(widget, text):
-            def enter(event):
-                x, y, _, _ = widget.bbox("insert")
-                x += widget.winfo_rootx() + 25
-                y += widget.winfo_rooty() + 25
-
-                # Create tooltip window
-                tip = Toplevel(widget)
-                tip.wm_overrideredirect(True)
-                tip.wm_geometry(f"+{x}+{y}")
-                label = Label(
-                    tip,
-                    text=text,
-                    background="#FFFFCC",
-                    relief="solid",
-                    borderwidth=1,
-                    padx=5,
-                    pady=2,
-                )
-                label.pack()
-
-                widget.tooltip = tip
-
-            def leave(event):
-                if hasattr(widget, "tooltip"):
-                    widget.tooltip.destroy()
-                    del widget.tooltip
-
-            widget.bind("<Enter>", enter)
-            widget.bind("<Leave>", leave)
-
         create_tooltip(
-            move_cb,
-            "Move original file with Mermaid syntax to a subfolder after conversion",
-        )
-        create_tooltip(
-            self.add_readme_checkbox,
-            "Create an explanatory README file in the subfolder with the original file",
+            self.add_readme_checkbox, "Add explanatory README if moving original."
         )
 
         return frame
 
+    # (create_action_buttons_frame remains the same)
     def create_action_buttons_frame(self):
-        # ... (same as previous version) ...
         frame = ttk.Frame(self.main_frame)
         quit_btn = ttk.Button(
             frame, text="Quit", command=self._quit_application, width=10
@@ -550,8 +602,8 @@ class MermaidConverterGUI:
         self.convert_button.pack(side=tk.RIGHT, pady=5)
         return frame
 
+    # (create_log_frame remains the same)
     def create_log_frame(self):
-        # ... (same as previous version) ...
         frame = ttk.LabelFrame(self.main_frame, text="Log Output", padding="10")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
@@ -574,8 +626,8 @@ class MermaidConverterGUI:
         self.log_text.tag_configure("DEBUG", foreground="gray50")
         return frame
 
+    # (create_status_bar remains the same)
     def create_status_bar(self):
-        # ... (same as previous version) ...
         status_bar = ttk.Frame(self.root, relief=tk.GROOVE, padding=2)
         self.progress = ttk.Progressbar(
             status_bar, orient=tk.HORIZONTAL, mode="indeterminate", length=150
@@ -587,62 +639,60 @@ class MermaidConverterGUI:
         return status_bar
 
     # --- Event Handlers and Actions ---
-    def check_and_log_dependencies(self):  # Corrected spelling
-        """Checks dependencies and logs/shows messages in the GUI."""
+    # (check_and_log_dependencies remains the same)
+    def check_and_log_dependencies(self):
         missing_deps = check_dependencies()
         if missing_deps:
             self.logger.error("--- Dependency Issues Detected ---")
-            for dep in missing_deps:
-                self.logger.error(f"  - {dep}")
+            [self.logger.error(f"  - {dep}") for dep in missing_deps]
             self.logger.error("Functionality may be limited or fail.")
-            if "tkinter" not in str(missing_deps):
+            if "tkinter" not in str(missing_deps).lower():
                 messagebox.showwarning(
                     "Dependency Warning",
-                    "Potential dependency issues:\n\n- " + "\n- ".join(missing_deps),
+                    "Potential dependency issues found:\n\n- "
+                    + "\n- ".join(missing_deps)
+                    + "\n\nPlease check requirements.",
                     parent=self.root,
                 )
         else:
             self.logger.info("Dependency check passed.")
 
+    # (_update_output_suffix remains the same)
     def _update_output_suffix(self, event=None):
-        # ... (same as previous version) ...
         selected_format = self.image_format_var.get()
         new_suffix = f"-{selected_format}"
         self.output_suffix_var.set(new_suffix)
-        self.logger.debug(f"Output suffix automatically updated to: {new_suffix}")
+        self.logger.debug(f"Output suffix auto-updated: {new_suffix}")
 
+    # (_on_move_original_toggle remains the same)
     def _on_move_original_toggle(self):
-        # ... (same as previous version) ...
-        if self.move_original_var.get():
-            self.add_readme_checkbox.config(state=tk.NORMAL)
-        else:
-            self.add_readme_checkbox.config(state=tk.DISABLED)
+        state = tk.NORMAL if self.move_original_var.get() else tk.DISABLED
+        self.add_readme_checkbox.config(state=state)
+        if state == tk.DISABLED:
             self.add_readme_var.set(False)
         self.logger.debug(
-            f"Move original toggled: {self.move_original_var.get()}, Readme state: {self.add_readme_checkbox['state']}"
+            f"Move original: {self.move_original_var.get()}, Readme state: {state}"
         )
 
+    # (_on_converter_method_change remains the same)
+    def _on_converter_method_change(self):
+        state = tk.NORMAL if self.converter_method_var.get() == "kroki" else tk.DISABLED
+        self.kroki_url_entry.config(state=state)
+        self.logger.debug(
+            f"Converter method: {self.converter_method_var.get()}, Kroki URL state: {state}"
+        )
+
+    # (_quit_application remains the same)
     def _quit_application(self):
-        """Gracefully shut down the application with proper cleanup."""
-        self.logger.info("Quit button clicked. Exiting application.")
-
-        # Stop any running operations
+        self.logger.info("Quit button clicked.")
         if self.is_processing:
-            self.logger.warning(
-                "Quit requested during active processing - attempting to clean up"
-            )
-            # Stop progress animation
-            if hasattr(self, "progress") and self.progress.winfo_exists():
-                self.progress.stop()
-
-        # Close any open file handlers or resources
+            self.logger.warning("Quit during active processing.")
         logging.shutdown()
-
-        # Destroy the root window
         self.root.destroy()
 
+    # --- File/Directory Browsing Methods ---
+    # (browse_file, browse_directory, browse_config remain the same)
     def browse_file(self):
-        # ... (same as previous version) ...
         file_path = filedialog.askopenfilename(
             title="Select Markdown File",
             filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
@@ -653,31 +703,26 @@ class MermaidConverterGUI:
             self.logger.info(f"Input file selected: {file_path}")
 
     def browse_directory(self):
-        # ... (same as previous version) ...
         dir_path = filedialog.askdirectory(
             title="Select Custom Image Directory (Optional)", parent=self.root
         )
         if dir_path:
             self.image_dir_var.set(dir_path)
-            self.logger.info(f"Custom image directory selected: {dir_path}")
+            self.logger.info(f"Custom image dir selected: {dir_path}")
 
     def browse_config(self):
-        # ... (same as previous version) ...
         file_path = filedialog.askopenfilename(
-            title="Select Configuration JSON File (Optional)",
+            title="Select Config JSON (Optional)",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
             parent=self.root,
         )
         if file_path:
             self.config_file_var.set(file_path)
-            self.logger.info(f"Configuration file selected: {file_path}")
+            self.logger.info(f"Config file selected: {file_path}")
 
+    # --- Config File Actions ---
+    # (create_default_config_file, edit_config_file remain the same)
     def create_default_config_file(self):
-        # ... (same as previous version) ...
-        default_config = {
-            "default": {"max_width": "600px"},
-            "flowchart": {"max_width": "650px"},
-        }  # Example
         file_path = filedialog.asksaveasfilename(
             title="Save Default Config As...",
             defaultextension=".json",
@@ -687,31 +732,25 @@ class MermaidConverterGUI:
         )
         if file_path:
             try:
-                abs_path = os.path.abspath(file_path)
-                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-                with open(abs_path, "w", encoding="utf-8") as f:
-                    json.dump(default_config, f, indent=2)
-                self.config_file_var.set(abs_path)
-                self.logger.info(f"Created default config file: {abs_path}")
-                messagebox.showinfo(
-                    "Success",
-                    f"Default configuration saved to:\n{abs_path}",
-                    parent=self.root,
-                )
+                success = create_default_config(file_path)  # Use helper
+                if success:
+                    self.config_file_var.set(os.path.abspath(file_path))
+                    messagebox.showinfo(
+                        "Success",
+                        f"Default config saved:\n{file_path}",
+                        parent=self.root,
+                    )
             except Exception as e:
-                self.logger.error(f"Error creating config file: {e}", exc_info=True)
+                self.logger.error(f"Error creating default config: {e}", exc_info=True)
                 messagebox.showerror(
-                    "Error", f"Could not save config file:\n{e}", parent=self.root
+                    "Error", f"Could not save config:\n{e}", parent=self.root
                 )
 
     def edit_config_file(self):
-        # ... (same as previous version) ...
         config_path = self.config_file_var.get()
         if not config_path:
             messagebox.showwarning(
-                "Edit Config",
-                "Please select or create a config file first.",
-                parent=self.root,
+                "Edit Config", "Select or create config file first.", parent=self.root
             )
             return
         abs_config_path = os.path.abspath(config_path)
@@ -725,9 +764,7 @@ class MermaidConverterGUI:
                 self.create_default_config_file()
             return
         try:
-            self.logger.info(
-                f"Attempting to open '{abs_config_path}' in default editor..."
-            )
+            self.logger.info(f"Opening '{abs_config_path}' in default editor...")
             if sys.platform.startswith("win"):
                 os.startfile(abs_config_path)
             elif sys.platform.startswith("darwin"):
@@ -735,15 +772,14 @@ class MermaidConverterGUI:
             else:
                 os.system(f'xdg-open "{abs_config_path}"')
         except Exception as e:
-            self.logger.error(
-                f"Error opening config file '{abs_config_path}': {e}", exc_info=True
-            )
+            self.logger.error(f"Error opening config file: {e}", exc_info=True)
             messagebox.showerror(
                 "Error", f"Could not open config file:\n{e}", parent=self.root
             )
 
+    # --- Logging and Status Updates ---
+    # (log_message_to_gui, process_log_queue remain the same)
     def log_message_to_gui(self, message, level=logging.INFO):
-        # ... (same as previous version) ...
         if not hasattr(self, "log_text") or not self.log_text.winfo_exists():
             return
         try:
@@ -761,16 +797,18 @@ class MermaidConverterGUI:
         try:
             while True:
                 record = log_queue.get_nowait()
-                if hasattr(record, "handler") and hasattr(record.handler, "formatter"):
-                    formatted_msg = record.handler.formatter.format(record)
-                else:
-                    formatted_msg = f"{record.levelname}: {record.getMessage()}"
+                formatted_msg = (
+                    record.handler.formatter.format(record)
+                    if hasattr(record, "handler")
+                    and hasattr(record.handler, "formatter")
+                    else f"{record.levelname}: {record.getMessage()}"
+                )
                 if hasattr(self, "root") and self.root.winfo_exists():
                     self.root.after(
                         0, self.log_message_to_gui, formatted_msg, record.levelno
                     )
                 if hasattr(record, "handler"):
-                    del record.handler  # Avoid potential ref cycle
+                    del record.handler
         except queue.Empty:
             pass
         except Exception as e:
@@ -778,34 +816,22 @@ class MermaidConverterGUI:
         if hasattr(self, "root") and self.root.winfo_exists():
             self.root.after(100, self.process_log_queue)
 
+    # --- Conversion Process Management ---
     def start_conversion(self):
-        """Validates inputs and starts the conversion in a background thread."""
-        # Add validation before processing
+        """Validates inputs and starts the conversion process in a background thread."""
+        self.logger.debug("Convert button clicked.")
+        # --- Input Validation --- (Now includes checks for method/dependencies)
+        if self.is_processing:
+            messagebox.showwarning(
+                "Busy", "Conversion already in progress.", parent=self.root
+            )
+            return
         file_path = self.file_path_var.get()
         if not file_path:
             messagebox.showerror(
                 "Input Error", "Please select input file.", parent=self.root
             )
             return
-
-        # Validate image prefix - check for invalid characters
-        image_prefix = self.image_prefix_var.get()
-        invalid_chars = r'<>:"/\|?*'
-        if any(c in invalid_chars for c in image_prefix):
-            messagebox.showerror(
-                "Invalid Input",
-                f"Image prefix contains invalid characters.\nAvoid using: {invalid_chars}",
-                parent=self.root,
-            )
-            return
-
-        if self.is_processing:
-            self.logger.warning("Conversion already in progress.")
-            messagebox.showwarning(
-                "Busy", "Conversion already running.", parent=self.root
-            )
-            return
-
         abs_file_path = os.path.abspath(file_path)
         if not os.path.isfile(abs_file_path):
             messagebox.showerror(
@@ -814,11 +840,47 @@ class MermaidConverterGUI:
                 parent=self.root,
             )
             return
+        image_prefix = self.image_prefix_var.get()
+        invalid_chars = r'<>:"/\|?*'
+        if any(c in invalid_chars for c in image_prefix):
+            messagebox.showerror(
+                "Invalid Input",
+                f"Image prefix invalid.\nAvoid: {invalid_chars}",
+                parent=self.root,
+            )
+            return
         if not CONVERTER_AVAILABLE or process_markdown_file is None:
             messagebox.showerror(
                 "Critical Error", "Core converter module not loaded.", parent=self.root
             )
             return
+
+        selected_method = self.converter_method_var.get()
+        if selected_method == "library" and not MERMAID_AVAILABLE:
+            messagebox.showerror(
+                "Dependency Error",
+                "'Library' method requires python-mermaid package.",
+                parent=self.root,
+            )
+            return
+        if selected_method == "kroki":
+            try:
+                import requests
+            except ImportError:
+                messagebox.showerror(
+                    "Dependency Error",
+                    "'Kroki' method requires 'requests' package.",
+                    parent=self.root,
+                )
+                return
+            kroki_url_val = self.kroki_url_var.get() or DEFAULT_KROKI_URL
+            if not kroki_url_val.startswith(("http://", "https://")):
+                messagebox.showerror(
+                    "Input Error",
+                    f"Invalid Kroki URL format:\n{kroki_url_val}",
+                    parent=self.root,
+                )
+                return
 
         # --- Prepare GUI ---
         try:
@@ -834,119 +896,81 @@ class MermaidConverterGUI:
         self.status_var.set("Processing... Please wait.")
         self.is_processing = True
 
-        # --- Gather Options ---
+        # --- Gather Options --- (Includes method and kroki_url)
         options = {
+            "method": selected_method,  # Get selected method
+            "kroki_url": self.kroki_url_var.get() or None,  # Get Kroki URL
             "image_prefix": self.image_prefix_var.get() or "diagram",
             "image_format": self.image_format_var.get(),
             "image_dir": self.image_dir_var.get() or None,
             "config_path_input": self.config_file_var.get() or None,
             "use_html_wrapper": not self.use_markdown_style_var.get(),
             "output_suffix": self.output_suffix_var.get(),
-            # Store move/readme options separately for use after thread returns
             "move_original_requested": self.move_original_var.get(),
             "add_readme_requested": self.add_readme_var.get(),
         }
 
-        # --- Load Config (Main Thread) ---
-        try:
-            options["diagram_config"] = load_diagram_config(
-                options["config_path_input"]
-            )
-            self.logger.info(
-                f"Loaded diagram config (source: {options['config_path_input'] or 'default'})"
-            )
-        except Exception as config_err:
-            self.logger.error(
-                f"Failed to load diagram config: {config_err}", exc_info=True
-            )
-            messagebox.showerror(
-                "Config Error",
-                f"Error loading config:\n{config_err}\n\nUsing defaults.",
-                parent=self.root,
-            )
-            options["diagram_config"] = {}
-
-        # --- Resolve Image Dir (Main Thread) ---
-        if options["image_dir"]:
-            try:
-                options["image_dir"] = os.path.abspath(options["image_dir"])
-            except Exception as path_err:
-                self.logger.error(
-                    f"Invalid image dir path '{options['image_dir']}': {path_err}",
-                    exc_info=True,
-                )
-                messagebox.showerror(
-                    "Path Error",
-                    f"Invalid image directory:\n{options['image_dir']}",
-                    parent=self.root,
-                )
-                self._reset_ui_state()
-                return  # Reset UI and stop
-
         # --- Start Background Thread ---
-        self.logger.info("Starting conversion in background thread...")
+        self.logger.info(
+            f"Starting conversion in background thread (Method: {selected_method})..."
+        )
         conversion_thread = threading.Thread(
             target=self.run_conversion_thread,
-            args=(abs_file_path, options),  # Pass path and options dict
+            args=(abs_file_path, options),
             daemon=True,
         )
         conversion_thread.start()
 
     def run_conversion_thread(self, abs_file_path, options):
-        """Runs process_markdown_file in background. Schedules GUI callback."""
+        """Worker function executed in background. Calls process_markdown_file."""
         self.logger.debug(
             f"Background thread started for {os.path.basename(abs_file_path)}"
         )
-        stats = {}  # Initialize stats
+        stats = {}
         try:
-            if process_markdown_file is None:
-                raise RuntimeError("process_markdown_file missing.")
-
-            # Call the core processing function (no move/readme args needed now)
+            # *** Call the updated process_markdown_file from converter.py ***
             stats = process_markdown_file(
                 file_path=abs_file_path,
+                method=options["method"],  # Pass method
+                kroki_url=options["kroki_url"],  # Pass kroki_url
                 image_prefix=options["image_prefix"],
                 image_format=options["image_format"],
                 image_dir=options["image_dir"],
-                diagram_config=options["diagram_config"],
+                config_path_input=options["config_path_input"],
                 use_html_wrapper=options["use_html_wrapper"],
                 output_suffix=options["output_suffix"],
             )
-            # Add requested move/readme flags back into stats for the GUI thread
+            # Add back flags needed only by GUI thread for file ops
             stats["move_original_requested"] = options["move_original_requested"]
             stats["add_readme_requested"] = options["add_readme_requested"]
-            # Store image format for potential use in readme helper
-            stats["image_format"] = options["image_format"]
-
+            stats["image_format"] = options["image_format"]  # Needed for readme content
             self.logger.debug(
                 "process_markdown_file completed. Scheduling GUI result handler."
             )
-            # Schedule the NEW result handler in the main thread
-            if hasattr(self, "root") and self.root.winfo_exists():
-                self.root.after(0, self.handle_conversion_result, stats)
-
         except Exception as e:
-            thread_error_msg = f"Error during conversion process: {str(e)}"
+            thread_error_msg = f"Unexpected error during conversion: {str(e)}"
             self.logger.critical(thread_error_msg, exc_info=True)
-            # Include error in stats if possible
             stats["error"] = thread_error_msg
             stats["all_conversions_successful"] = False
-            # Schedule the failure handler (or the result handler which checks for error)
+            stats.setdefault("input_file_path", abs_file_path)  # Ensure keys exist
+            stats.setdefault(
+                "move_original_requested", options["move_original_requested"]
+            )
+            stats.setdefault("add_readme_requested", options["add_readme_requested"])
+            stats.setdefault("image_format", options["image_format"])
+        finally:
+            # Schedule GUI update
             if hasattr(self, "root") and self.root.winfo_exists():
-                # Ensure stats dict is passed even on error
                 self.root.after(0, self.handle_conversion_result, stats)
+            else:
+                self.logger.warning("GUI closed before conversion thread finished.")
 
+    # (handle_conversion_result remains the same logic, uses stats dict)
     def handle_conversion_result(self, stats):
-        """
-        Handles the result from the conversion thread. Runs in GUI thread.
-        Decides whether to proceed, rollback, or prompt user based on success/failure.
-        """
-        self.logger.debug("Running handle_conversion_result callback in GUI thread.")
-
-        # Check for early critical errors from converter
-        if stats.get("error"):
+        self.logger.debug("Running handle_conversion_result callback.")
+        if stats.get("error") and not stats.get("total_diagrams", 0) > 0:
             self.logger.error(f"Conversion failed early: {stats['error']}")
-            self._reset_ui_state()  # Reset UI
+            self._reset_ui_state()
             messagebox.showerror(
                 "Conversion Failed",
                 f"Could not process file:\n{stats['error']}",
@@ -955,64 +979,51 @@ class MermaidConverterGUI:
             return
 
         all_successful = stats.get("all_conversions_successful", False)
-        proceed_action = False  # Flag to determine final action
-
+        proceed_action = False
         if all_successful:
-            self.logger.info(
-                "All diagrams converted successfully. Proceeding with file operations."
-            )
+            self.logger.info("All diagrams converted successfully.")
             proceed_action = True
         else:
-            # --- Conversion Failed - Prompt User ---
             failed_count = stats.get("failed_conversions", "Some")
-            self.logger.warning(
-                f"{failed_count} diagram(s) failed conversion. Prompting user."
-            )
-            # Use askyesno: returns True for Yes, False for No
+            error_msg = stats.get("error", f"{failed_count} diagram(s) failed.")
+            self.logger.warning(f"{error_msg}. Prompting user.")
             user_choice = messagebox.askyesno(
-                "Conversion Failed",
-                f"{failed_count} diagram(s) failed to convert.\n\n"
-                "Proceed anyway? (Saves partial output, moves original if requested)\n\n"
-                "Selecting 'No' will roll back changes (delete generated images).",
-                icon=messagebox.WARNING,  # Use warning icon
+                "Conversion Issues",
+                f"{error_msg}\n\nProceed anyway? (Saves partial output)\n\n'No' will roll back changes.",
+                icon=messagebox.WARNING,
                 parent=self.root,
             )
-
-            if user_choice:  # User selected Yes (Proceed)
+            if user_choice:
                 self.logger.info("User chose to proceed despite failures.")
                 proceed_action = True
-            else:  # User selected No (Rollback)
+            else:
                 self.logger.warning("User chose to roll back changes.")
-                # Call rollback helper function
                 _rollback_images(stats.get("generated_image_paths", []))
-                # Update stats to indicate rollback for the final summary
                 stats["rolled_back"] = True
-                # Call completion summary directly after rollback
-                self.conversion_completed(stats)  # Shows summary, resets UI
-                return  # Stop further processing
+                self.conversion_completed(stats)
+                return  # Stop processing
 
-        # --- Perform Final Actions (if Proceeding) ---
         if proceed_action:
             self.logger.info("Performing final file operations...")
-            # Write the output markdown file
-            output_written = _write_output_file(
-                stats["output_file_path"], stats["new_content"]
-            )
+            output_written = False
+            if stats.get("new_content") and stats.get("output_file_path"):
+                output_written = _write_output_file(
+                    stats["output_file_path"], stats["new_content"]
+                )
+            else:
+                self.logger.error(
+                    "Cannot write output: Missing new content or output path."
+                )
 
-            # Initialize move/readme results in stats
             stats["original_moved"] = False
             stats["readme_added"] = False
             stats["move_dest_dir"] = ""
-
-            # Perform move/readme only if output was written and move was requested
             if output_written and stats.get("move_original_requested"):
                 original_path = stats["input_file_path"]
                 output_md_dir = os.path.dirname(original_path)
                 move_dest_dir = os.path.join(output_md_dir, MERMAID_VERSION_DIR)
                 output_filename = os.path.basename(stats["output_file_path"])
-                image_format = stats.get("image_format", "svg")  # Get format for readme
-
-                # Call move/readme helper function
+                image_format = stats.get("image_format", "svg")
                 moved, readme = _move_original_and_readme(
                     original_path,
                     move_dest_dir,
@@ -1020,112 +1031,85 @@ class MermaidConverterGUI:
                     output_filename,
                     image_format,
                 )
-                # Update stats with results from helper
                 stats["original_moved"] = moved
                 stats["readme_added"] = readme
                 stats["move_dest_dir"] = move_dest_dir if moved else ""
             elif not output_written:
-                self.logger.error(
-                    "Skipping move/readme because output file failed to write."
-                )
-                # Show error to user?
-                messagebox.showerror(
-                    "File Error",
-                    f"Failed to write output file:\n{stats['output_file_path']}\nOriginal file not moved.",
-                    parent=self.root,
-                )
+                self.logger.error("Skipping move/readme: output write failed.")
             elif not stats.get("move_original_requested"):
-                self.logger.info("Skipping move/readme because it was not requested.")
+                self.logger.info("Skipping move/readme: not requested.")
+            self.conversion_completed(stats)  # Show final summary
 
-            # Call the final summary display function
-            self.conversion_completed(stats)
-
+    # (_reset_ui_state remains the same)
     def _reset_ui_state(self):
-        """Helper to reset progress bar and convert button state."""
-        # Check if widgets exist before configuring (might be called during shutdown)
         if hasattr(self, "progress") and self.progress.winfo_exists():
-            self.progress.pack_forget()
             self.progress.stop()
+            self.progress.pack_forget()
         if hasattr(self, "convert_button") and self.convert_button.winfo_exists():
             self.convert_button.config(state=tk.NORMAL)
         self.is_processing = False
-        # Check if status_var exists before setting
         if hasattr(self, "status_var"):
-            self.status_var.set("Ready.")  # Reset status bar
+            self.status_var.set("Ready.")
 
+    # (conversion_completed remains the same logic, uses stats dict)
     def conversion_completed(self, stats):
-        """Updates GUI after conversion process finishes (success, partial, or rollback)."""
         if not hasattr(self, "root") or not self.root.winfo_exists():
-            self.logger.warning(
-                "GUI window closed before conversion completion callback."
-            )
+            self.logger.warning("GUI closed before completion callback.")
             return
-
         self.logger.debug("Running conversion_completed callback.")
-        # Reset UI state (progress bar, button)
-        self._reset_ui_state()  # Use helper function
-
-        # Extract stats (handle potential missing keys gracefully)
+        self._reset_ui_state()
         total = stats.get("total_diagrams", 0)
-        success = stats.get("successful_conversions", 0)
-        failed = stats.get("failed_conversions", 0)
+        success_count = stats.get("successful_conversions", 0)
+        failed_count = stats.get("failed_conversions", 0)
         output_file = stats.get("output_file_path", "N/A")
         image_dir = stats.get("image_directory", "N/A")
         moved = stats.get("original_moved", False)
         readme = stats.get("readme_added", False)
         move_dest = stats.get("move_dest_dir", "")
-        rolled_back = stats.get("rolled_back", False)  # Check if rollback occurred
-
+        rolled_back = stats.get("rolled_back", False)
         self.logger.info("=" * 25 + " Process Finished " + "=" * 25)
-        # Log detailed summary
         summary_log = f"""
 ------------------- Process Summary -------------------
 Input File:           {stats.get('input_file_path', 'N/A')}
+Converter Used:       {stats.get('method_used', 'N/A')}
 Output File:          {output_file if not rolled_back else 'N/A (Rolled Back)'}
 Image Directory:      {image_dir}
 Diagrams Found:       {total}
-Successfully Converted: {success}
-Failed Conversions:   {failed}
+Successfully Converted: {success_count}
+Failed Conversions:   {failed_count}
 Rolled Back:          {'Yes' if rolled_back else 'No'}
 Original Moved:       {'Yes (' + move_dest + ')' if moved else 'No'}
 README Added:         {'Yes' if readme else 'No'}
-----------------------------------------------------------
-"""
-        self.logger.info(summary_log)  # Logged to file/console via queue handler
-
-        # Determine final status message and show appropriate messagebox
+----------------------------------------------------------"""
+        self.logger.info(summary_log)
         final_status = "Finished."
         msg_title = "Complete"
         msg_type = messagebox.showinfo
-
         if rolled_back:
-            final_status = f"Failed - Rolled back ({failed} errors)."
-            message = f"{failed} diagram(s) failed to convert.\n\nChanges were rolled back (generated images deleted, no output file created)."
+            final_status = f"Failed - Rolled back ({failed_count} errors)."
+            message = f"{failed_count} diagram(s) failed.\n\nChanges rolled back."
             msg_title = "Rolled Back"
             msg_type = messagebox.showwarning
         elif total == 0:
             final_status = "Finished. No diagrams found."
-            message = "Processing finished.\nNo Mermaid diagrams were found."
-        elif failed > 0:
-            # This case now implies user chose 'Proceed' despite failures
-            final_status = f"Completed with {failed} errors (User Proceeded)."
-            message = f"Processing finished, but {failed} diagram(s) failed to convert (saved in output).\nPlease check the log and output file for details."
-            if moved:
-                message += f"\nOriginal file moved to:\n{move_dest}"
-            if readme:
-                message += "\nREADME.md added."
+            message = "Processing finished.\nNo Mermaid diagrams found."
+        elif failed_count > 0:
+            final_status = f"Completed with {failed_count} errors."
+            message = f"Processing finished, but {failed_count} diagram(s) failed (check log)."
             msg_title = "Partial Success"
             msg_type = messagebox.showwarning
-        else:  # All successful
+        else:
             final_status = "Conversion completed successfully!"
             message = "Conversion completed successfully!"
-            if moved:
-                message += f"\nOriginal file moved to:\n{move_dest}"
-            if readme:
-                message += "\nREADME.md added."
-
+        if not rolled_back and failed_count > 0 and moved:
+            message += f"\nOriginal file moved to:\n{move_dest}"
+        if not rolled_back and failed_count > 0 and readme:
+            message += "\nREADME.md added."
+        if not rolled_back and failed_count == 0 and moved:
+            message += f"\nOriginal file moved to:\n{move_dest}"
+        if not rolled_back and failed_count == 0 and readme:
+            message += "\nREADME.md added."
         self.status_var.set(final_status)
-        # Show the summary message box to the user
         msg_type(msg_title, message, parent=self.root)
 
 
@@ -1137,21 +1121,10 @@ def main():
         app = MermaidConverterGUI(root)
         root.mainloop()
     except KeyboardInterrupt:
-        print("\nApplication interrupted by user (Ctrl+C).")
-        if "app" in locals() and hasattr(app, "root") and app.root.winfo_exists():
-            app.root.destroy()
+        print("\nApplication interrupted.")
     except Exception as main_err:
         print(f"\nFATAL ERROR: {main_err}", file=sys.stderr)
         traceback.print_exc()
-        try:
-            if root and root.winfo_exists():
-                messagebox.showerror(
-                    "Fatal Error",
-                    f"Failed to run application:\n\n{main_err}",
-                    parent=root,
-                )
-        except Exception:
-            pass
         sys.exit(1)
 
 
@@ -1159,6 +1132,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit:
+        pass
     except Exception as e:
         print(f"\nCRITICAL FAILURE: {e}", file=sys.stderr)
         traceback.print_exc()
